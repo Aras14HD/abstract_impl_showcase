@@ -1,0 +1,9 @@
+[package]
+name = "abs-test"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+abstract-impl = {path = "../abstract-impl"}
+datetime = "0.5.2"
+thiserror = "2.0.11"
