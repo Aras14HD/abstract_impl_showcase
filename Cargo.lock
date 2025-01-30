@@ -13,9 +13,9 @@ dependencies = [
 
 [[package]]
 name = "abstract-impl"
-version = "0.2.3"
+version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "95d3aeda1e3efdd8364d4f4f447e25db57a00ba7b7a0abf179f8ed851b00adf7"
+checksum = "b5cd10bda15a1cdc1788de67d139feb7c7d3355ef2c41029117d5ac690ba868c"
 dependencies = [
  "proc-macro2",
  "quote",

@@ -1,27 +1,9 @@
 mod traits {
     use abstract_impl::*;
     use thiserror::Error;
-    pub trait TimeType {
-        type Time;
-    }
-    #[abstract_impl(no_dummy)]
-    impl TimeUsingType<T> for TimeType {
-        type Time = T;
-    }
-    pub trait AuthTokenType {
-        type AuthToken;
-    }
-    #[abstract_impl(no_dummy)]
-    impl AuthTokenUsingType<T> for AuthTokenType {
-        type AuthToken = T;
-    }
-    pub trait DurationType {
-        type Duration;
-    }
-    #[abstract_impl(no_dummy)]
-    impl DurationUsingType<T> for DurationType {
-        type Duration = T;
-    }
+    type_trait!(AuthToken);
+    type_trait!(Time);
+    type_trait!(Duration);
 
     pub trait FromSecs {
         fn from_secs(secs: u64) -> Self;
@@ -81,17 +63,6 @@ mod traits {
     pub trait HasAuth {
         type Token;
         fn has_auth(&self, token: &Self::Token) -> bool;
-    }
-
-    #[macro_export]
-    macro_rules! impl_AsRef_with_field {
-        (<$t:ty> $s:ty {$e:ident}) => {
-            impl AsRef<$t> for $s {
-                fn as_ref(&self) -> &$t {
-                    &self.$e
-                }
-            }
-        };
     }
 }
 
@@ -195,6 +166,7 @@ mod impls {
     }
 }
 
+use abstract_impl::*;
 use datetime::LocalDateTime;
 use impls::*;
 use std::time::SystemTime;
@@ -226,7 +198,7 @@ pub struct Site {
     pub content: Content,
     pub privilege: Privilege,
 }
-impl_AsRef_with_field!(<Content> Site {content});
+impl_conversion_with_field!(<Content> Site {content});
 impl HasAuth for Site {
     type Token = Token;
     fn has_auth(&self, token: &Self::Token) -> bool {
@@ -247,8 +219,8 @@ struct AuthedMockApp {
     token: Token,
     app: std::sync::Arc<MockApp>,
 }
-impl_AsRef_with_field!(<MockApp> AuthedMockApp {app});
-impl_AsRef_with_field!(<Token> AuthedMockApp {token});
+impl_as_ref_with_field!(<MockApp> AuthedMockApp {app});
+impl_conversion_with_field!(<Token> AuthedMockApp {token});
 impl_GetSiteWithAuth!(<MockApp, Content> AuthedMockApp);
 impl AuthedMockApp {
     fn new(
