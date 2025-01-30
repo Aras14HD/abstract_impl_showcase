@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-abstract-impl = {path = "../abstract-impl"}
+# abstract-impl = {path = "../abstract-impl"}
+abstract-impl = "0.2.3"
 datetime = "0.5.2"
 thiserror = "2.0.11"

@@ -150,7 +150,7 @@ mod impls {
         Forbidden,
         Internal(#[from] Internal),
     }
-    #[abstract_impl(no_dummy)]
+    #[abstract_impl]
     impl GetSiteWithAuth<SiteStore, S> for GetSite
     where
         SiteStore: GetSite + 'static,
