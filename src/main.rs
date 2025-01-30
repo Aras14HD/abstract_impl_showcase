@@ -15,7 +15,7 @@ mod traits {
     impl AuthTokenUsingType<T> for AuthTokenType {
         type AuthToken = T;
     }
-    #[derive(Error)]
+    #[derive(Error, Debug)]
     pub enum ValidateAuthTokenErr<Internal, Reason> {
         Invalid(#[from] Reason),
         Internal(Internal),
@@ -61,23 +61,12 @@ mod traits {
         fn has_auth(&self, token: &Self::Token) -> bool;
     }
 
-    pub trait Get<T> {
-        fn get(self) -> T;
-        fn get_ref(&self) -> &T;
-        fn get_mut(&mut self) -> &mut T;
-    }
     #[macro_export]
-    macro_rules! impl_get_with_field {
+    macro_rules! impl_AsRef_with_field {
         (<$t:ty> $s:ty {$e:ident}) => {
-            impl Get<$t> for $s {
-                fn get(self) -> $t {
-                    self.$e
-                }
-                fn get_ref(&self) -> &$t {
+            impl AsRef<$t> for $s {
+                fn as_ref(&self) -> &$t {
                     &self.$e
-                }
-                fn get_mut(&mut self) -> &mut $t {
-                    &mut self.$e
                 }
             }
         };
@@ -90,7 +79,7 @@ mod impls {
     use datetime::LocalDateTime;
     use thiserror::Error;
 
-    #[derive(Error)]
+    #[derive(Error, Debug)]
     pub enum ValidateTokenNotExpiredErr<CurrentTimeErr, FetchAuthTokenExpiryErr> {
         CurrentTime(CurrentTimeErr),
         FetchAuthTokenExpiry(FetchAuthTokenExpiryErr),
@@ -154,8 +143,8 @@ mod impls {
     impl GetSiteWithAuth<SiteStore, S> for GetSite
     where
         SiteStore: GetSite + 'static,
-        <SiteStore as GetSite>::Site: Get<S> + HasAuth,
-        Self: Get<SiteStore> + Get<<<SiteStore as GetSite>::Site as HasAuth>::Token>,
+        <SiteStore as GetSite>::Site: AsRef<S> + HasAuth,
+        Self: AsRef<SiteStore> + AsRef<<<SiteStore as GetSite>::Site as HasAuth>::Token>,
     {
         type Site = S;
         type InternalErr = SiteAuthError<<SiteStore as GetSite>::InternalErr>;
@@ -163,46 +152,42 @@ mod impls {
             &'a self,
             uri: &str,
         ) -> Result<&'a Self::Site, SiteError<Self::InternalErr>> {
-            let site = Get::<SiteStore>::get_ref(self)
+            let site = AsRef::<SiteStore>::as_ref(self)
                 .get_site(uri)
                 .map_err(|e| match e {
                     SiteError::Internal(i) => SiteError::Internal(SiteAuthError::from(i)),
                     SiteError::NotFound => SiteError::NotFound,
                 })?;
-            if !site.has_auth(self.get_ref()) {
+            if !site.has_auth(self.as_ref()) {
                 return Err(SiteError::Internal(SiteAuthError::Forbidden));
             };
-            Ok(site.get_ref())
+            Ok(site.as_ref())
         }
     }
 }
 
 use datetime::LocalDateTime;
 use impls::*;
-use std::{collections::BTreeMap, time::Duration};
+use std::{collections::BTreeMap, env::args, sync::Arc, time::Duration};
 use traits::*;
 
 type Token = String;
 pub struct MockApp {
     pub auth_tokens_store: BTreeMap<Token, LocalDateTime>,
-    pub sites: Sites,
-    pub current_auth: Token,
+    pub sites: BTreeMap<String, Site>,
 }
-impl_get_with_field!(<Token> MockApp {current_auth});
-pub struct Sites(BTreeMap<String, Site>);
-impl_get_with_field!(<Sites> MockApp {sites});
-impl GetSite for Sites {
+impl GetSite for MockApp {
     type Site = Site;
     type InternalErr = std::convert::Infallible;
     fn get_site<'a>(&'a self, uri: &str) -> Result<&'a Self::Site, SiteError<Self::InternalErr>> {
-        self.0.get(uri).ok_or(SiteError::NotFound)
+        self.sites.get(uri).ok_or(SiteError::NotFound)
     }
 }
 pub struct Site {
     pub content: String,
     pub privilege: Privilege,
 }
-impl_get_with_field!(<String> Site {content});
+impl_AsRef_with_field!(<String> Site {content});
 impl HasAuth for Site {
     type Token = Token;
     fn has_auth(&self, token: &Self::Token) -> bool {
@@ -219,12 +204,40 @@ pub enum Privilege {
     Blacklist(Vec<Token>),
 }
 
-impl_GetSiteWithAuth!(<Sites, String> MockApp);
+struct AuthedMockApp {
+    token: Token,
+    app: std::sync::Arc<MockApp>,
+}
+impl_AsRef_with_field!(<MockApp> AuthedMockApp {app});
+impl_AsRef_with_field!(<Token> AuthedMockApp {token});
+impl_GetSiteWithAuth!(<MockApp, String> AuthedMockApp);
+impl AuthedMockApp {
+    fn new(
+        app: Arc<MockApp>,
+        token: Token,
+    ) -> (
+        Self,
+        Option<
+            ValidateAuthTokenErr<
+                <MockApp as ValidateAuthToken>::InternalError,
+                <MockApp as ValidateAuthToken>::InvalidReason,
+            >,
+        >,
+    ) {
+        let (token, err) = match app.validate_auth_token(&token) {
+            Ok(_) => (token, None),
+            Err(err) => (String::new(), Some(err)),
+        };
+        (AuthedMockApp { token, app }, err)
+    }
+}
+
 impl_UseLocalDateTime!(MockApp);
 impl_TimeUsingLocal!(MockApp);
 impl_AuthTokenUsingType!(<String> MockApp);
 impl_ValidateTokenNotExpired!(MockApp);
 
+#[derive(Debug)]
 pub struct MissingToken;
 impl FetchAuthTokenExpiry for MockApp {
     type Error = MissingToken;
@@ -232,6 +245,9 @@ impl FetchAuthTokenExpiry for MockApp {
         &self,
         auth_token: &Self::AuthToken,
     ) -> Result<Self::Time, Self::Error> {
+        if auth_token == &Self::AuthToken::default() {
+            return Ok(LocalDateTime::now().add_seconds(60 * 5));
+        }
         self.auth_tokens_store
             .get(auth_token)
             .cloned()
@@ -240,12 +256,13 @@ impl FetchAuthTokenExpiry for MockApp {
 }
 
 fn main() {
-    let mut app = MockApp {
+    let app = Arc::new(MockApp {
         auth_tokens_store: BTreeMap::from([
             ("Test".to_string(), LocalDateTime::now().add_seconds(1)),
             ("Other".to_string(), LocalDateTime::now().add_seconds(1000)),
+            ("You".to_string(), LocalDateTime::now().add_seconds(0)),
         ]),
-        sites: Sites(BTreeMap::from([
+        sites: BTreeMap::from([
             (
                 "/".to_string(),
                 Site {
@@ -267,22 +284,20 @@ fn main() {
                     privilege: Privilege::Blacklist(vec!["Test".to_string()]),
                 },
             ),
-        ])),
-        current_auth: "".to_string(),
-    };
-    let token = "Other".to_string();
+        ]),
+    });
+    let mut args = args().skip(1);
+    let token = args.next().unwrap_or("".to_string());
+    let route = args.next().unwrap_or("/".to_string());
 
     // std::thread::sleep(Duration::from_secs(1));
 
-    match app.validate_auth_token(&token) {
-        Ok(_) => {
-            app.current_auth = token;
-        }
-        Err(ValidateAuthTokenErr::Invalid(reason)) => eprintln!("Token is invalid: {reason:?}"),
-        Err(ValidateAuthTokenErr::Internal(ValidateTokenNotExpiredErr::FetchAuthTokenExpiry(
-            MissingToken,
-        ))) => eprintln!("Token {token} not found"),
+    let (app, auth_err) = AuthedMockApp::new(app, token);
+
+    if let Some(auth_err) = auth_err {
+        println!("{auth_err:?}")
     };
-    let site = app.get_site("/not-him").unwrap();
+
+    let site = app.get_site(&route).unwrap();
     println!("{site}");
 }
