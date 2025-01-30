@@ -1,5 +1,5 @@
 mod traits {
-    use abstract_impl::abstract_impl;
+    use abstract_impl::*;
     use thiserror::Error;
     pub trait TimeType {
         type Time;
@@ -15,6 +15,28 @@ mod traits {
     impl AuthTokenUsingType<T> for AuthTokenType {
         type AuthToken = T;
     }
+    pub trait DurationType {
+        type Duration;
+    }
+    #[abstract_impl(no_dummy)]
+    impl DurationUsingType<T> for DurationType {
+        type Duration = T;
+    }
+
+    pub trait FromSecs {
+        fn from_secs(secs: u64) -> Self;
+    }
+    impl FromSecs for std::time::Duration {
+        fn from_secs(secs: u64) -> Self {
+            std::time::Duration::from_secs(secs)
+        }
+    }
+    impl FromSecs for datetime::Duration {
+        fn from_secs(secs: u64) -> Self {
+            datetime::Duration::of(secs as i64)
+        }
+    }
+
     #[derive(Error, Debug)]
     pub enum ValidateAuthTokenErr<Internal, Reason> {
         Invalid(#[from] Reason),
@@ -77,6 +99,7 @@ mod impls {
     use super::traits::*;
     use abstract_impl::abstract_impl;
     use datetime::LocalDateTime;
+    use std::time::SystemTime;
     use thiserror::Error;
 
     #[derive(Error, Debug)]
@@ -118,10 +141,6 @@ mod impls {
         }
     }
 
-    #[abstract_impl]
-    impl TimeUsingLocal for TimeType {
-        type Time = LocalDateTime;
-    }
     pub type Void = std::convert::Infallible;
     #[abstract_impl(no_dummy)]
     impl UseLocalDateTime for CurrentTime
@@ -131,6 +150,16 @@ mod impls {
         type Error = Void;
         fn current_time() -> Result<LocalDateTime, Void> {
             Ok(LocalDateTime::now())
+        }
+    }
+    #[abstract_impl(no_dummy)]
+    impl UseSystemTime for CurrentTime
+    where
+        Self: TimeType<Time = SystemTime>,
+    {
+        type Error = Void;
+        fn current_time() -> Result<SystemTime, Void> {
+            Ok(SystemTime::now())
         }
     }
 
@@ -168,13 +197,23 @@ mod impls {
 
 use datetime::LocalDateTime;
 use impls::*;
-use std::{collections::BTreeMap, env::args, sync::Arc, time::Duration};
+use std::time::SystemTime;
+use std::{collections::BTreeMap, env::args, sync::Arc};
 use traits::*;
 
-type Token = String;
+// Everything can be changed here! Super generic
+type Token = Option<Arc<str>>;
+type URI = &'static str;
+type Content = &'static str;
+type Time = LocalDateTime;
+type Duration = datetime::Duration;
+impl_UseLocalDateTime!(MockApp);
+
+impl_ValidateTokenNotExpired!(MockApp);
+
 pub struct MockApp {
-    pub auth_tokens_store: BTreeMap<Token, LocalDateTime>,
-    pub sites: BTreeMap<String, Site>,
+    pub auth_tokens_store: BTreeMap<Token, <Self as TimeType>::Time>,
+    pub sites: BTreeMap<URI, Site>,
 }
 impl GetSite for MockApp {
     type Site = Site;
@@ -184,17 +223,17 @@ impl GetSite for MockApp {
     }
 }
 pub struct Site {
-    pub content: String,
+    pub content: Content,
     pub privilege: Privilege,
 }
-impl_AsRef_with_field!(<String> Site {content});
+impl_AsRef_with_field!(<Content> Site {content});
 impl HasAuth for Site {
     type Token = Token;
     fn has_auth(&self, token: &Self::Token) -> bool {
         match &self.privilege {
             Privilege::None => true,
             Privilege::Whitelist(l) => l.contains(token),
-            Privilege::Blacklist(l) => !l.contains(token) && token != "",
+            Privilege::Blacklist(l) => !l.contains(token) && token != &Token::default(),
         }
     }
 }
@@ -210,7 +249,7 @@ struct AuthedMockApp {
 }
 impl_AsRef_with_field!(<MockApp> AuthedMockApp {app});
 impl_AsRef_with_field!(<Token> AuthedMockApp {token});
-impl_GetSiteWithAuth!(<MockApp, String> AuthedMockApp);
+impl_GetSiteWithAuth!(<MockApp, Content> AuthedMockApp);
 impl AuthedMockApp {
     fn new(
         app: Arc<MockApp>,
@@ -226,16 +265,15 @@ impl AuthedMockApp {
     ) {
         let (token, err) = match app.validate_auth_token(&token) {
             Ok(_) => (token, None),
-            Err(err) => (String::new(), Some(err)),
+            Err(err) => (Token::default(), Some(err)),
         };
         (AuthedMockApp { token, app }, err)
     }
 }
 
-impl_UseLocalDateTime!(MockApp);
-impl_TimeUsingLocal!(MockApp);
-impl_AuthTokenUsingType!(<String> MockApp);
-impl_ValidateTokenNotExpired!(MockApp);
+impl_TimeUsingType!(<Time> MockApp);
+impl_DurationUsingType!(<Duration> MockApp);
+impl_AuthTokenUsingType!(<Token> MockApp);
 
 #[derive(Debug)]
 pub struct MissingToken;
@@ -246,7 +284,9 @@ impl FetchAuthTokenExpiry for MockApp {
         auth_token: &Self::AuthToken,
     ) -> Result<Self::Time, Self::Error> {
         if auth_token == &Self::AuthToken::default() {
-            return Ok(LocalDateTime::now().add_seconds(60 * 5));
+            return Ok(
+                Self::current_time().unwrap() + <Self as DurationType>::Duration::from_secs(60 * 5)
+            );
         }
         self.auth_tokens_store
             .get(auth_token)
@@ -258,37 +298,49 @@ impl FetchAuthTokenExpiry for MockApp {
 fn main() {
     let app = Arc::new(MockApp {
         auth_tokens_store: BTreeMap::from([
-            ("Test".to_string(), LocalDateTime::now().add_seconds(1)),
-            ("Other".to_string(), LocalDateTime::now().add_seconds(1000)),
-            ("You".to_string(), LocalDateTime::now().add_seconds(0)),
+            (
+                Some("Test".into()),
+                MockApp::current_time().unwrap()
+                    + <MockApp as DurationType>::Duration::from_secs(1),
+            ),
+            (
+                Some("Other".into()),
+                MockApp::current_time().unwrap()
+                    + <MockApp as DurationType>::Duration::from_secs(1000),
+            ),
+            (
+                Some("You".into()),
+                MockApp::current_time().unwrap()
+                    + <MockApp as DurationType>::Duration::from_secs(0),
+            ),
         ]),
         sites: BTreeMap::from([
             (
-                "/".to_string(),
+                "/".into(),
                 Site {
-                    content: "Hi! This is our Site".to_string(),
+                    content: "Hi! This is our Site",
                     privilege: Privilege::None,
                 },
             ),
             (
-                "/priv".to_string(),
+                "/priv".into(),
                 Site {
-                    content: "This is private data!".to_string(),
-                    privilege: Privilege::Whitelist(vec!["Test".to_string()]),
+                    content: "This is private data!",
+                    privilege: Privilege::Whitelist(vec![Some("Test".into())]),
                 },
             ),
             (
-                "/not-him".to_string(),
+                "/not-him".into(),
                 Site {
-                    content: "This is semi private data!".to_string(),
-                    privilege: Privilege::Blacklist(vec!["Test".to_string()]),
+                    content: "This is semi private data!",
+                    privilege: Privilege::Blacklist(vec![Some("Test".into())]),
                 },
             ),
         ]),
     });
     let mut args = args().skip(1);
-    let token = args.next().unwrap_or("".to_string());
-    let route = args.next().unwrap_or("/".to_string());
+    let token = args.next().map(Into::into);
+    let route = args.next().unwrap_or("/".into());
 
     // std::thread::sleep(Duration::from_secs(1));
 
